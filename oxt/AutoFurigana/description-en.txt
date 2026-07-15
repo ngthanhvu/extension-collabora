@@ -1,0 +1,4 @@
+Adds automatic hiragana readings to selected Japanese text in Writer.
+
+Select Japanese text and click Auto Furigana on the toolbar or choose
+Tools > Add-ons > Auto Furigana. Processing is completely offline.
