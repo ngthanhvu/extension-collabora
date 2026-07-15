@@ -6,15 +6,10 @@
     <node oor:name="AddonMenu">
       <node oor:name="vn.edu.autofurigana.command" oor:op="replace">
         <prop oor:name="URL" oor:type="xs:string">
-          <value>vnd.sun.star.script:AutoFurigana-0.7.1.oxt|Scripts|python|AutoFurigana.py$apply_furigana?language=Python&amp;location=user:uno_packages</value>
+          <value>vnd.sun.star.script:AutoFurigana-1.2.2.oxt|Scripts|python|AutoFurigana.py$phonetic_guide?language=Python&amp;location=user:uno_packages</value>
         </prop>
         <prop oor:name="Title" oor:type="xs:string"><value>Auto Furigana</value></prop>
-        <prop oor:name="Target" oor:type="xs:string"><value>_self</value></prop>
-        <prop oor:name="Context" oor:type="xs:string"><value>com.sun.star.text.TextDocument</value></prop>
-      </node>
-      <node oor:name="vn.edu.autofurigana.edit" oor:op="replace">
-        <prop oor:name="URL" oor:type="xs:string"><value>vnd.sun.star.script:AutoFurigana-0.7.1.oxt|Scripts|python|AutoFurigana.py$edit_furigana?language=Python&amp;location=user:uno_packages</value></prop>
-        <prop oor:name="Title" oor:type="xs:string"><value>Edit Furigana</value></prop>
+        <prop oor:name="ImageIdentifier" oor:type="xs:string"><value>.uno:RubyDialog</value></prop>
         <prop oor:name="Target" oor:type="xs:string"><value>_self</value></prop>
         <prop oor:name="Context" oor:type="xs:string"><value>com.sun.star.text.TextDocument</value></prop>
       </node>
@@ -23,17 +18,19 @@
       <node oor:name="vn.edu.autofurigana.toolbar" oor:op="replace">
         <node oor:name="apply" oor:op="replace">
           <prop oor:name="URL" oor:type="xs:string">
-            <value>vnd.sun.star.script:AutoFurigana-0.7.1.oxt|Scripts|python|AutoFurigana.py$apply_furigana?language=Python&amp;location=user:uno_packages</value>
+            <value>vnd.sun.star.script:AutoFurigana-1.2.2.oxt|Scripts|python|AutoFurigana.py$phonetic_guide?language=Python&amp;location=user:uno_packages</value>
           </prop>
           <prop oor:name="Title" oor:type="xs:string"><value>Auto Furigana</value></prop>
+          <prop oor:name="ImageIdentifier" oor:type="xs:string"><value>.uno:RubyDialog</value></prop>
           <prop oor:name="Target" oor:type="xs:string"><value>_self</value></prop>
           <prop oor:name="Context" oor:type="xs:string"><value>com.sun.star.text.TextDocument</value></prop>
         </node>
-        <node oor:name="edit" oor:op="replace">
-          <prop oor:name="URL" oor:type="xs:string"><value>vnd.sun.star.script:AutoFurigana-0.7.1.oxt|Scripts|python|AutoFurigana.py$edit_furigana?language=Python&amp;location=user:uno_packages</value></prop>
-          <prop oor:name="Title" oor:type="xs:string"><value>Edit Furigana</value></prop>
+        <node oor:name="loader" oor:op="replace">
+          <prop oor:name="URL" oor:type="xs:string"><value>.uno:RubyDialog</value></prop>
+          <prop oor:name="Title" oor:type="xs:string"><value>Auto Furigana</value></prop>
+          <prop oor:name="ImageIdentifier" oor:type="xs:string"><value/></prop>
           <prop oor:name="Target" oor:type="xs:string"><value>_self</value></prop>
-          <prop oor:name="Context" oor:type="xs:string"><value>com.sun.star.text.TextDocument</value></prop>
+          <prop oor:name="Context" oor:type="xs:string"><value>com.sun.star.sheet.SpreadsheetDocument</value></prop>
         </node>
       </node>
     </node>

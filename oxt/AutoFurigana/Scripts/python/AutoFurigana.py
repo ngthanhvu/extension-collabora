@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import hashlib
+import functools
 import re
 import sys
 
@@ -64,19 +65,66 @@ def _selection(document):
     return item if hasattr(item, "getString") else None
 
 
+def _dictionary_parts(original, reading):
+    """Split a word like 漢字 into exact dictionary-backed ruby groups."""
+    converter = _converter()
+    jconv = converter._kakasi._jconv
+
+    @functools.lru_cache(maxsize=None)
+    def solve(base_at, reading_at):
+        if base_at == len(original) and reading_at == len(reading):
+            return ()
+        if base_at >= len(original) or reading_at > len(reading):
+            return None
+
+        char = original[base_at]
+        candidates = []
+        if KANJI.match(char):
+            table = jconv._kanwa.load(char) or {}
+            for base, values in table.items():
+                if not original.startswith(base, base_at):
+                    continue
+                for yomi, _context in values:
+                    if reading.startswith(yomi, reading_at):
+                        candidates.append((base, yomi))
+        else:
+            literal = _converter().convert(char)[0]["hira"]
+            if reading.startswith(literal, reading_at):
+                candidates.append((char, literal))
+
+        best = None
+        for base, yomi in candidates:
+            tail = solve(base_at + len(base), reading_at + len(yomi))
+            if tail is None:
+                continue
+            part = ((base_at, len(base), yomi),) + tail
+            # Prefer Mono-like output: the greatest number of exact groups.
+            if best is None or len(part) > len(best):
+                best = part
+        return best
+
+    return solve(0, 0)
+
+
 def _segments(text):
-    """Return (offset, length, reading) for tokens containing kanji."""
+    """Return exact Mono-like groups, falling back to a whole-word group."""
     offset = 0
     for token in _converter().convert(text):
         original = token["orig"]
         if KANJI.search(original):
-            yield offset, len(original), token["hira"]
+            parts = _dictionary_parts(original, token["hira"])
+            if parts:
+                for part_offset, length, reading in parts:
+                    if KANJI.search(original[part_offset:part_offset + length]):
+                        yield offset + part_offset, length, reading
+            else:
+                yield offset, len(original), token["hira"]
         offset += len(original)
 
 
 def _input_reading(
     initial, ruby_adjust=1, font_size=6.0,
-    font_name="Noto Sans CJK JP", gap=0
+    font_name="Noto Sans CJK JP", gap=0, base_text=""
 ):
     """Show a small editor that does not depend on Asian-language UI options."""
     context = uno.getComponentContext()
@@ -93,7 +141,7 @@ def _input_reading(
     label = model.createInstance("com.sun.star.awt.UnoControlFixedTextModel")
     label.PositionX, label.PositionY = 8, 8
     label.Width, label.Height = 204, 12
-    label.Label = "Hiragana reading:"
+    label.Label = "Base: {}    Ruby (separate with |):".format(base_text)
     model.insertByName("label", label)
 
     field = model.createInstance("com.sun.star.awt.UnoControlEditModel")
@@ -206,6 +254,137 @@ def _input_reading(
     return value
 
 
+def _phonetic_guide_dialog(
+    rows, ruby_adjust=1, font_size=6.0,
+    font_name="Noto Sans CJK JP", gap=0
+):
+    """Show an Asian Phonetic Guide-like editor with one ruby field per base."""
+    context = uno.getComponentContext()
+    service = context.ServiceManager
+    visible_rows = min(max(len(rows), 1), 12)
+    row_height = 19
+    controls_y = 34 + visible_rows * row_height
+    model = service.createInstanceWithContext(
+        "com.sun.star.awt.UnoControlDialogModel", context
+    )
+    model.PositionX, model.PositionY = 65, 35
+    model.Width = 430
+    model.Height = controls_y + 105
+    model.Title = "Auto Furigana - Phonetic Guide"
+
+    def fixed(name, x, y, width, label):
+        item = model.createInstance("com.sun.star.awt.UnoControlFixedTextModel")
+        item.PositionX, item.PositionY = x, y
+        item.Width, item.Height = width, 12
+        item.Label = label
+        model.insertByName(name, item)
+
+    fixed("base_header", 8, 8, 170, "Base text")
+    fixed("ruby_header", 188, 8, 170, "Ruby text")
+
+    for index, (base, reading) in enumerate(rows[:visible_rows]):
+        y = 23 + index * row_height
+        base_field = model.createInstance("com.sun.star.awt.UnoControlEditModel")
+        base_field.PositionX, base_field.PositionY = 8, y
+        base_field.Width, base_field.Height = 170, 15
+        base_field.Text = base
+        base_field.ReadOnly = True
+        model.insertByName("base_{}".format(index), base_field)
+
+        ruby_field = model.createInstance("com.sun.star.awt.UnoControlEditModel")
+        ruby_field.PositionX, ruby_field.PositionY = 188, y
+        ruby_field.Width, ruby_field.Height = 170, 15
+        ruby_field.Text = reading
+        ruby_field.TabIndex = index
+        model.insertByName("ruby_{}".format(index), ruby_field)
+
+    fixed("mode", 378, 8, 42, "Mono")
+    fixed("align_label", 8, controls_y + 3, 55, "Alignment:")
+    alignment = model.createInstance("com.sun.star.awt.UnoControlListBoxModel")
+    alignment.PositionX, alignment.PositionY = 63, controls_y
+    alignment.Width, alignment.Height = 58, 16
+    alignment.StringItemList = ("Left", "Center", "Right")
+    alignment.SelectedItems = (ruby_adjust if ruby_adjust in (0, 1, 2) else 1,)
+    alignment.Dropdown = True
+    model.insertByName("alignment", alignment)
+
+    fixed("position_label", 130, controls_y + 3, 48, "Position:")
+    fixed("position", 178, controls_y + 3, 32, "Top")
+    fixed("size_label", 320, controls_y + 3, 28, "Size:")
+    size = model.createInstance("com.sun.star.awt.UnoControlNumericFieldModel")
+    size.PositionX, size.PositionY = 350, controls_y
+    size.Width, size.Height = 38, 16
+    size.Value = float(font_size if font_size is not None else 6.0)
+    size.ValueMin, size.ValueMax, size.ValueStep = 4.0, 30.0, 0.5
+    size.DecimalAccuracy, size.Spin = 1, True
+    model.insertByName("size", size)
+
+    fixed("font_label", 8, controls_y + 27, 32, "Font:")
+    font = model.createInstance("com.sun.star.awt.UnoControlEditModel")
+    font.PositionX, font.PositionY = 40, controls_y + 24
+    font.Width, font.Height = 205, 15
+    font.Text = font_name or "Noto Sans CJK JP"
+    model.insertByName("font", font)
+
+    fixed("gap_label", 265, controls_y + 27, 48, "Gap (%):")
+    gap_field = model.createInstance("com.sun.star.awt.UnoControlNumericFieldModel")
+    gap_field.PositionX, gap_field.PositionY = 315, controls_y + 24
+    gap_field.Width, gap_field.Height = 58, 16
+    gap_field.Value = float(gap if gap is not None else 0)
+    gap_field.ValueMin, gap_field.ValueMax, gap_field.ValueStep = -50.0, 100.0, 5.0
+    gap_field.DecimalAccuracy, gap_field.Spin = 0, True
+    model.insertByName("gap", gap_field)
+
+    fixed("preview_label", 8, controls_y + 50, 45, "Preview:")
+    preview_rows = rows[:6]
+    ruby_preview = model.createInstance("com.sun.star.awt.UnoControlFixedTextModel")
+    ruby_preview.PositionX, ruby_preview.PositionY = 55, controls_y + 44
+    ruby_preview.Width, ruby_preview.Height = 365, 12
+    ruby_preview.Label = "　".join(reading for _base, reading in preview_rows)
+    ruby_preview.Align = 1
+    model.insertByName("ruby_preview", ruby_preview)
+    base_preview = model.createInstance("com.sun.star.awt.UnoControlFixedTextModel")
+    base_preview.PositionX, base_preview.PositionY = 55, controls_y + 58
+    base_preview.Width, base_preview.Height = 365, 12
+    base_preview.Label = "　".join(base for base, _reading in preview_rows)
+    base_preview.Align = 1
+    model.insertByName("base_preview", base_preview)
+
+    ok = model.createInstance("com.sun.star.awt.UnoControlButtonModel")
+    ok.PositionX, ok.PositionY = 296, controls_y + 79
+    ok.Width, ok.Height = 58, 17
+    ok.Label, ok.PushButtonType, ok.DefaultButton = "Apply", 1, True
+    model.insertByName("ok", ok)
+    cancel = model.createInstance("com.sun.star.awt.UnoControlButtonModel")
+    cancel.PositionX, cancel.PositionY = 362, controls_y + 79
+    cancel.Width, cancel.Height = 58, 17
+    cancel.Label, cancel.PushButtonType = "Cancel", 2
+    model.insertByName("cancel", cancel)
+
+    dialog = service.createInstanceWithContext("com.sun.star.awt.UnoControlDialog", context)
+    dialog.setModel(model)
+    toolkit = service.createInstanceWithContext("com.sun.star.awt.Toolkit", context)
+    desktop = service.createInstanceWithContext("com.sun.star.frame.Desktop", context)
+    dialog.createPeer(toolkit, desktop.getCurrentFrame().getContainerWindow())
+    dialog.getControl("ruby_0").setFocus()
+    result = dialog.execute()
+    if result == 1:
+        value = (
+            [
+                dialog.getControl("ruby_{}".format(index)).getText().strip()
+                for index in range(visible_rows)
+            ],
+            dialog.getControl("alignment").getSelectedItemPos(),
+            dialog.getControl("size").getValue(),
+            dialog.getControl("font").getText(),
+            int(dialog.getControl("gap").getValue()),
+        )
+    else:
+        value = None
+    dialog.dispose()
+    return value
+
+
 def _ruby_style(document, font_size, font_name="Noto Sans CJK JP", gap=0):
     """Get or create a character style used only by ruby annotations."""
     size = max(4.0, min(30.0, round(float(font_size or 6.0) * 2) / 2))
@@ -223,6 +402,16 @@ def _ruby_style(document, font_size, font_name="Noto Sans CJK JP", gap=0):
         style.setPropertyValue("CharFontNameAsian", font_name)
         style.setPropertyValue("CharEscapement", gap)
         style.setPropertyValue("CharEscapementHeight", 100)
+        # Never add a printed background/highlight to generated ruby text.
+        for prop, value in (
+            ("CharBackColor", -1),
+            ("CharBackTransparent", True),
+            ("CharHighlight", -1),
+        ):
+            try:
+                style.setPropertyValue(prop, value)
+            except Exception:
+                pass
         styles.insertByName(name, style)
     return name
 
@@ -286,6 +475,43 @@ def apply_furigana(*_args):
         document.unlockControllers()
 
 
+def _selection_has_ruby(selection, text):
+    """Check generated ranges so reopening the guide never overwrites corrections."""
+    source = selection.getStart()
+    try:
+        for offset, length, _reading in _segments(text):
+            cursor = selection.getText().createTextCursorByRange(source)
+            cursor.goRight(offset, False)
+            cursor.goRight(length, True)
+            if cursor.getPropertyValue("RubyText"):
+                return True
+    except Exception:
+        # An ambiguous property normally means multiple ruby values are present.
+        return True
+    return False
+
+
+def phonetic_guide(*_args):
+    """Auto-fill ruby when needed, then open the extension's reliable editor."""
+    context = uno.getComponentContext()
+    desktop = context.ServiceManager.createInstanceWithContext(
+        "com.sun.star.frame.Desktop", context
+    )
+    document = desktop.getCurrentComponent()
+    if document is None or not document.supportsService("com.sun.star.text.TextDocument"):
+        _message("Please open a Writer document.", error=True)
+        return
+
+    selection = _selection(document)
+    text = selection.getString() if selection else ""
+    if not text:
+        _message("Select Japanese text first.")
+        return
+    if not _selection_has_ruby(selection, text):
+        apply_furigana()
+    edit_furigana()
+
+
 def edit_furigana(*_args):
     context = uno.getComponentContext()
     desktop = context.ServiceManager.createInstanceWithContext(
@@ -300,27 +526,44 @@ def edit_furigana(*_args):
     if selection is None or not selection.getString():
         _message("Double-click or select one Japanese word first.")
         return
-    try:
-        current = selection.getPropertyValue("RubyText") or ""
-    except Exception:
-        current = ""
-    try:
-        ruby_adjust = int(selection.getPropertyValue("RubyAdjust"))
-        style_name = selection.getPropertyValue("RubyCharStyleName") or ""
-    except Exception:
-        ruby_adjust, style_name = 1, ""
+    text = selection.getString()
+    source = selection.getStart()
+    ranges = []
+    for offset, length, automatic in _segments(text):
+        cursor = selection.getText().createTextCursorByRange(source)
+        cursor.goRight(offset, False)
+        cursor.goRight(length, True)
+        try:
+            current = cursor.getPropertyValue("RubyText") or automatic
+            ruby_adjust = int(cursor.getPropertyValue("RubyAdjust"))
+            style_name = cursor.getPropertyValue("RubyCharStyleName") or ""
+        except Exception:
+            current, ruby_adjust, style_name = automatic, 1, ""
+        ranges.append((cursor, cursor.getString(), current))
+    if not ranges:
+        _message("The selection does not contain Kanji.")
+        return
+
     font_name, gap = _ruby_style_values(document, style_name)
-    edited = _input_reading(
-        current, ruby_adjust, _ruby_size(document, style_name), font_name, gap
+    edited = _phonetic_guide_dialog(
+        [(base, reading) for _cursor, base, reading in ranges],
+        ruby_adjust, _ruby_size(document, style_name), font_name, gap
     )
     if edited is not None:
-        reading, ruby_adjust, font_size, font_name, gap = edited
-        selection.setPropertyValue("RubyText", reading.strip())
-        selection.setPropertyValue("RubyIsAbove", True)
-        selection.setPropertyValue("RubyAdjust", ruby_adjust)
-        selection.setPropertyValue(
-            "RubyCharStyleName", _ruby_style(document, font_size, font_name, gap)
-        )
+        readings, ruby_adjust, font_size, font_name, gap = edited
+        style = _ruby_style(document, font_size, font_name, gap)
+        for (cursor, _base, _old), reading in zip(ranges, readings):
+            cursor.setPropertyValue("RubyText", reading)
+            cursor.setPropertyValue("RubyIsAbove", True)
+            cursor.setPropertyValue("RubyAdjust", ruby_adjust)
+            cursor.setPropertyValue("RubyCharStyleName", style)
+        # Remove the selection highlight after Apply.
+        try:
+            document.getCurrentController().getViewCursor().gotoRange(
+                selection.getEnd(), False
+            )
+        except Exception:
+            pass
 
 
-g_exportedScripts = (apply_furigana, edit_furigana)
+g_exportedScripts = (phonetic_guide, apply_furigana, edit_furigana)
