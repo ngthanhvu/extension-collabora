@@ -6,13 +6,13 @@ viên chọn văn bản tiếng Nhật trong Writer và bấm **Auto Furigana** 
 
 ## Cài đặt cho giáo viên
 
-File cài đặt phiên bản 1.2.2 đã được tạo tại
-[`dist/AutoFurigana-1.2.2.oxt`](dist/AutoFurigana-1.2.2.oxt).
+File cài đặt phiên bản 1.4.0 đã được tạo tại
+[`dist/AutoFurigana-1.4.0.oxt`](dist/AutoFurigana-1.4.0.oxt).
 
 1. Nếu đã cài bản cũ, mở **Tools > Extension Manager**, chọn Auto Furigana và
    bấm **Remove**.
 2. Đóng hoàn toàn tất cả cửa sổ Collabora Office.
-3. Mở lại Collabora Office, nhấp đúp vào `AutoFurigana-1.2.2.oxt`.
+3. Mở lại Collabora Office, nhấp đúp vào `AutoFurigana-1.4.0.oxt`.
 4. Chọn **Install** trong Extension Manager.
 5. Đóng và mở lại Collabora Office Writer.
 
@@ -55,7 +55,7 @@ Mã extension nằm trong `oxt/AutoFurigana`. Build lại bằng:
 ./scripts/build-oxt.sh
 ```
 
-Tên kết quả có kèm version, ví dụ `dist/AutoFurigana-1.2.2.oxt`.
+Tên kết quả có kèm version, ví dụ `dist/AutoFurigana-1.4.0.oxt`.
 
 Thư viện nhúng:
 

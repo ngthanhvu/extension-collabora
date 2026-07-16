@@ -7,6 +7,9 @@ import re
 import sys
 
 import uno
+import unohelper
+from com.sun.star.frame import XStatusListener
+from com.sun.star.awt import XActionListener
 
 
 def _find_vendor():
@@ -35,6 +38,98 @@ from pykakasi import kakasi  # noqa: E402
 
 KANJI = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 CONVERTER = None
+
+
+class _CommandStatus(unohelper.Base, XStatusListener):
+    def __init__(self):
+        self.state = None
+
+    def statusChanged(self, event):
+        self.state = event.State
+
+    def disposing(self, _event):
+        pass
+
+
+class _GuidePager(unohelper.Base, XActionListener):
+    """Page through long selections without losing edited ruby readings."""
+
+    def __init__(self, dialog, rows, page_size):
+        self.dialog = dialog
+        self.rows = rows
+        self.page_size = page_size
+        self.page = 0
+
+    @property
+    def page_count(self):
+        return max(1, (len(self.rows) + self.page_size - 1) // self.page_size)
+
+    def _save(self):
+        start = self.page * self.page_size
+        for slot in range(self.page_size):
+            index = start + slot
+            if index >= len(self.rows):
+                break
+            self.rows[index][1] = self.dialog.getControl(
+                "ruby_{}".format(slot)
+            ).getText().strip()
+
+    def show(self):
+        start = self.page * self.page_size
+        current = self.rows[start:start + self.page_size]
+        for slot in range(self.page_size):
+            base = self.dialog.getControl("base_{}".format(slot))
+            ruby = self.dialog.getControl("ruby_{}".format(slot))
+            if slot < len(current):
+                base.setText(current[slot][0])
+                ruby.setText(current[slot][1])
+                base.setVisible(True)
+                ruby.setVisible(True)
+            else:
+                base.setVisible(False)
+                ruby.setVisible(False)
+        self.dialog.getControl("page").setText(
+            "{}/{}".format(self.page + 1, self.page_count)
+        )
+        self.dialog.getControl("previous").setEnable(self.page > 0)
+        self.dialog.getControl("next").setEnable(self.page + 1 < self.page_count)
+        self.dialog.getControl("ruby_preview").setText(
+            "　".join(reading for _base, reading in current)
+        )
+        self.dialog.getControl("base_preview").setText(
+            "　".join(base for base, _reading in current)
+        )
+
+    def actionPerformed(self, event):
+        self._save()
+        if event.ActionCommand == "previous" and self.page > 0:
+            self.page -= 1
+        elif event.ActionCommand == "next" and self.page + 1 < self.page_count:
+            self.page += 1
+        self.show()
+
+    def disposing(self, _event):
+        pass
+
+
+def _hide_field_shading(document):
+    """Turn off Writer's on-screen ruby shading when its state is available."""
+    try:
+        frame = document.getCurrentController().getFrame()
+        url = uno.getComponentContext().ServiceManager.createInstanceWithContext(
+            "com.sun.star.util.URLTransformer", uno.getComponentContext()
+        )
+        command = uno.createUnoStruct("com.sun.star.util.URL")
+        command.Complete = ".uno:FieldShadings"
+        url.parseStrict(command)
+        dispatch = frame.queryDispatch(command, "", 0)
+        listener = _CommandStatus()
+        dispatch.addStatusListener(listener, command)
+        dispatch.removeStatusListener(listener, command)
+        if listener.state is True:
+            dispatch.dispatch(command, ())
+    except Exception:
+        pass
 
 
 def _message(text, title="Auto Furigana", error=False):
@@ -106,6 +201,58 @@ def _dictionary_parts(original, reading):
     return solve(0, 0)
 
 
+def _split_kanji_reading(base, reading):
+    """Split one all-Kanji group into one editable reading per character."""
+    if len(base) <= 1:
+        return (reading,)
+    jconv = _converter()._kakasi._jconv
+    target = max(1.0, len(reading) / len(base))
+
+    @functools.lru_cache(maxsize=None)
+    def solve(char_at, reading_at):
+        remaining_chars = len(base) - char_at
+        remaining_reading = len(reading) - reading_at
+        if remaining_chars == 0:
+            return (0.0, ()) if remaining_reading == 0 else None
+        if remaining_reading < remaining_chars:
+            return None
+
+        char = base[char_at]
+        candidates = set()
+        table = jconv._kanwa.load(char) or {}
+        for key, values in table.items():
+            if key != char:
+                continue
+            for yomi, _context in values:
+                if reading.startswith(yomi, reading_at):
+                    candidates.add(yomi)
+
+        choices = [(value, 20.0) for value in candidates]
+        max_length = remaining_reading - (remaining_chars - 1)
+        for length in range(1, max_length + 1):
+            value = reading[reading_at:reading_at + length]
+            choices.append((value, -abs(length - target)))
+
+        best = None
+        for value, local_score in choices:
+            tail = solve(char_at + 1, reading_at + len(value))
+            if tail is None:
+                continue
+            score = local_score + tail[0]
+            result = (score, (value,) + tail[1])
+            if best is None or result[0] > best[0]:
+                best = result
+        return best
+
+    result = solve(0, 0)
+    if result is not None:
+        return result[1]
+    # A reading normally has at least one kana per Kanji; keep a safe fallback.
+    return tuple(reading[index:index + 1] for index in range(len(base) - 1)) + (
+        reading[len(base) - 1:],
+    )
+
+
 def _segments(text):
     """Return exact Mono-like groups, falling back to a whole-word group."""
     offset = 0
@@ -115,10 +262,22 @@ def _segments(text):
             parts = _dictionary_parts(original, token["hira"])
             if parts:
                 for part_offset, length, reading in parts:
-                    if KANJI.search(original[part_offset:part_offset + length]):
-                        yield offset + part_offset, length, reading
+                    base = original[part_offset:part_offset + length]
+                    if KANJI.search(base):
+                        if len(base) > 1 and all(KANJI.match(char) for char in base):
+                            char_readings = _split_kanji_reading(base, reading)
+                            for index, char_reading in enumerate(char_readings):
+                                yield offset + part_offset + index, 1, char_reading
+                        else:
+                            yield offset + part_offset, length, reading
             else:
-                yield offset, len(original), token["hira"]
+                if len(original) > 1 and all(KANJI.match(char) for char in original):
+                    for index, char_reading in enumerate(
+                        _split_kanji_reading(original, token["hira"])
+                    ):
+                        yield offset + index, 1, char_reading
+                else:
+                    yield offset, len(original), token["hira"]
         offset += len(original)
 
 
@@ -261,7 +420,8 @@ def _phonetic_guide_dialog(
     """Show an Asian Phonetic Guide-like editor with one ruby field per base."""
     context = uno.getComponentContext()
     service = context.ServiceManager
-    visible_rows = min(max(len(rows), 1), 12)
+    page_size = 10
+    visible_rows = page_size
     row_height = 19
     controls_y = 34 + visible_rows * row_height
     model = service.createInstanceWithContext(
@@ -269,7 +429,7 @@ def _phonetic_guide_dialog(
     )
     model.PositionX, model.PositionY = 65, 35
     model.Width = 430
-    model.Height = controls_y + 105
+    model.Height = controls_y + 132
     model.Title = "Auto Furigana - Phonetic Guide"
 
     def fixed(name, x, y, width, label):
@@ -282,7 +442,8 @@ def _phonetic_guide_dialog(
     fixed("base_header", 8, 8, 170, "Base text")
     fixed("ruby_header", 188, 8, 170, "Ruby text")
 
-    for index, (base, reading) in enumerate(rows[:visible_rows]):
+    for index in range(visible_rows):
+        base, reading = rows[index] if index < len(rows) else ("", "")
         y = 23 + index * row_height
         base_field = model.createInstance("com.sun.star.awt.UnoControlEditModel")
         base_field.PositionX, base_field.PositionY = 8, y
@@ -299,6 +460,17 @@ def _phonetic_guide_dialog(
         model.insertByName("ruby_{}".format(index), ruby_field)
 
     fixed("mode", 378, 8, 42, "Mono")
+    previous = model.createInstance("com.sun.star.awt.UnoControlButtonModel")
+    previous.PositionX, previous.PositionY = 366, 23
+    previous.Width, previous.Height = 20, 15
+    previous.Label = "‹"
+    model.insertByName("previous", previous)
+    fixed("page", 388, 25, 20, "1/1")
+    next_button = model.createInstance("com.sun.star.awt.UnoControlButtonModel")
+    next_button.PositionX, next_button.PositionY = 410, 23
+    next_button.Width, next_button.Height = 20, 15
+    next_button.Label = "›"
+    model.insertByName("next", next_button)
     fixed("align_label", 8, controls_y + 3, 55, "Alignment:")
     alignment = model.createInstance("com.sun.star.awt.UnoControlListBoxModel")
     alignment.PositionX, alignment.PositionY = 63, controls_y
@@ -336,27 +508,38 @@ def _phonetic_guide_dialog(
     model.insertByName("gap", gap_field)
 
     fixed("preview_label", 8, controls_y + 50, 45, "Preview:")
-    preview_rows = rows[:6]
+    preview_frame = model.createInstance("com.sun.star.awt.UnoControlGroupBoxModel")
+    preview_frame.PositionX, preview_frame.PositionY = 55, controls_y + 43
+    preview_frame.Width, preview_frame.Height = 365, 57
+    preview_frame.Label = ""
+    model.insertByName("preview_frame", preview_frame)
+    preview_rows = rows[:page_size]
     ruby_preview = model.createInstance("com.sun.star.awt.UnoControlFixedTextModel")
-    ruby_preview.PositionX, ruby_preview.PositionY = 55, controls_y + 44
-    ruby_preview.Width, ruby_preview.Height = 365, 12
+    ruby_preview.PositionX, ruby_preview.PositionY = 63, controls_y + 51
+    ruby_preview.Width, ruby_preview.Height = 349, 16
     ruby_preview.Label = "　".join(reading for _base, reading in preview_rows)
     ruby_preview.Align = 1
+    ruby_font = uno.createUnoStruct("com.sun.star.awt.FontDescriptor")
+    ruby_font.Height = 11
+    ruby_preview.FontDescriptor = ruby_font
     model.insertByName("ruby_preview", ruby_preview)
     base_preview = model.createInstance("com.sun.star.awt.UnoControlFixedTextModel")
-    base_preview.PositionX, base_preview.PositionY = 55, controls_y + 58
-    base_preview.Width, base_preview.Height = 365, 12
+    base_preview.PositionX, base_preview.PositionY = 63, controls_y + 70
+    base_preview.Width, base_preview.Height = 349, 22
     base_preview.Label = "　".join(base for base, _reading in preview_rows)
     base_preview.Align = 1
+    base_font = uno.createUnoStruct("com.sun.star.awt.FontDescriptor")
+    base_font.Height = 18
+    base_preview.FontDescriptor = base_font
     model.insertByName("base_preview", base_preview)
 
     ok = model.createInstance("com.sun.star.awt.UnoControlButtonModel")
-    ok.PositionX, ok.PositionY = 296, controls_y + 79
+    ok.PositionX, ok.PositionY = 296, controls_y + 107
     ok.Width, ok.Height = 58, 17
     ok.Label, ok.PushButtonType, ok.DefaultButton = "Apply", 1, True
     model.insertByName("ok", ok)
     cancel = model.createInstance("com.sun.star.awt.UnoControlButtonModel")
-    cancel.PositionX, cancel.PositionY = 362, controls_y + 79
+    cancel.PositionX, cancel.PositionY = 362, controls_y + 107
     cancel.Width, cancel.Height = 58, 17
     cancel.Label, cancel.PushButtonType = "Cancel", 2
     model.insertByName("cancel", cancel)
@@ -366,14 +549,19 @@ def _phonetic_guide_dialog(
     toolkit = service.createInstanceWithContext("com.sun.star.awt.Toolkit", context)
     desktop = service.createInstanceWithContext("com.sun.star.frame.Desktop", context)
     dialog.createPeer(toolkit, desktop.getCurrentFrame().getContainerWindow())
+    editable_rows = [[base, reading] for base, reading in rows]
+    pager = _GuidePager(dialog, editable_rows, page_size)
+    dialog.getControl("previous").setActionCommand("previous")
+    dialog.getControl("next").setActionCommand("next")
+    dialog.getControl("previous").addActionListener(pager)
+    dialog.getControl("next").addActionListener(pager)
+    pager.show()
     dialog.getControl("ruby_0").setFocus()
     result = dialog.execute()
     if result == 1:
+        pager._save()
         value = (
-            [
-                dialog.getControl("ruby_{}".format(index)).getText().strip()
-                for index in range(visible_rows)
-            ],
+            [reading for _base, reading in editable_rows],
             dialog.getControl("alignment").getSelectedItemPos(),
             dialog.getControl("size").getValue(),
             dialog.getControl("font").getText(),
@@ -564,6 +752,7 @@ def edit_furigana(*_args):
             )
         except Exception:
             pass
+        _hide_field_shading(document)
 
 
 g_exportedScripts = (phonetic_guide, apply_furigana, edit_furigana)
